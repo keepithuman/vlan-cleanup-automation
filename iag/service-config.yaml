@@ -1,0 +1,190 @@
+# IAG Service Configuration for VLAN Cleanup Automation
+---
+# This file configures the VLAN cleanup automation as a service in Itential Automation Gateway (IAG)
+
+service:
+  name: "vlan-cleanup-automation"
+  description: "Enterprise VLAN cleanup automation service for multi-vendor networks"
+  version: "1.0.0"
+  type: "python-script"
+  
+# Service metadata
+metadata:
+  author: "Network Automation Team"
+  tags:
+    - "network"
+    - "vlan"
+    - "cleanup"
+    - "cisco"
+    - "arista"
+    - "juniper"
+    - "automation"
+  category: "Network Management"
+  
+# Execution configuration
+execution:
+  script_path: "main.py"
+  working_directory: "/opt/iag/services/vlan-cleanup-automation"
+  timeout: 1800  # 30 minutes
+  environment:
+    - "PYTHONPATH=/opt/iag/services/vlan-cleanup-automation"
+    - "NETWORK_USERNAME={{ .Inputs.username }}"
+    - "NETWORK_PASSWORD={{ .Inputs.password }}"
+    - "NETWORK_ENABLE_PASSWORD={{ .Inputs.enable_password }}"
+
+# Input parameters
+inputs:
+  - name: "config_file"
+    type: "string"
+    description: "Path to configuration file"
+    default: "config.yaml"
+    required: true
+    
+  - name: "dry_run"
+    type: "boolean"
+    description: "Run in dry-run mode (no actual changes)"
+    default: true
+    required: true
+    
+  - name: "execute"
+    type: "boolean"
+    description: "Execute actual VLAN cleanup"
+    default: false
+    required: false
+    
+  - name: "approve_all"
+    type: "boolean"
+    description: "Auto-approve high-risk VLAN removals"
+    default: false
+    required: false
+    
+  - name: "output_file"
+    type: "string"
+    description: "Output file for results"
+    default: ""
+    required: false
+    
+  - name: "generate_csv"
+    type: "boolean"
+    description: "Generate CSV summary report"
+    default: true
+    required: false
+    
+  - name: "username"
+    type: "string"
+    description: "Network device username"
+    required: true
+    sensitive: true
+    
+  - name: "password"
+    type: "string"
+    description: "Network device password"
+    required: true
+    sensitive: true
+    
+  - name: "enable_password"
+    type: "string"
+    description: "Enable password for Cisco devices"
+    required: false
+    sensitive: true
+    
+  - name: "devices"
+    type: "array"
+    description: "List of devices to process (overrides config file)"
+    required: false
+    items:
+      type: "object"
+      properties:
+        hostname:
+          type: "string"
+        ip_address:
+          type: "string"
+        vendor:
+          type: "string"
+          enum: ["cisco", "arista", "juniper"]
+        device_type:
+          type: "string"
+
+# Output schema
+outputs:
+  - name: "report_file"
+    type: "string"
+    description: "Path to generated report file"
+    
+  - name: "csv_file"
+    type: "string"
+    description: "Path to CSV summary file"
+    
+  - name: "summary"
+    type: "object"
+    description: "Executive summary of results"
+    properties:
+      total_devices:
+        type: "integer"
+      successful_devices:
+        type: "integer"
+      total_vlans:
+        type: "integer"
+      unused_vlans:
+        type: "integer"
+      cleanup_percentage:
+        type: "number"
+      time_saved_hours:
+        type: "number"
+      cost_savings_usd:
+        type: "number"
+      
+  - name: "recommendations"
+    type: "array"
+    description: "Operational recommendations"
+    items:
+      type: "string"
+
+# Dependencies
+dependencies:
+  python_packages:
+    - "netmiko>=4.2.0"
+    - "paramiko>=3.2.0"
+    - "PyYAML>=6.0"
+    - "cryptography>=41.0.0"
+    - "rich>=13.0.0"
+    
+# Resource requirements
+resources:
+  cpu: "1"
+  memory: "512Mi"
+  disk: "100Mi"
+
+# Scheduling options
+scheduling:
+  max_concurrent_executions: 1
+  retry_policy:
+    max_retries: 2
+    backoff_strategy: "exponential"
+    initial_interval: "30s"
+    max_interval: "5m"
+
+# Monitoring and alerting
+monitoring:
+  health_check:
+    enabled: true
+    endpoint: "/health"
+    interval: "30s"
+    
+  metrics:
+    enabled: true
+    prometheus_endpoint: "/metrics"
+    
+  logging:
+    level: "INFO"
+    structured: true
+    format: "json"
+
+# Security configuration
+security:
+  run_as_user: "iag"
+  capabilities:
+    drop:
+      - "ALL"
+  read_only_root_filesystem: true
+  allow_privilege_escalation: false
