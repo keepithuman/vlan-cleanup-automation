@@ -1,0 +1,423 @@
+name: CI/CD Pipeline - VLAN Cleanup Automation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  PYTHON_VERSION: '3.9'
+  SERVICE_NAME: 'vlan-cleanup-automation'
+
+jobs:
+  # Testing and Quality Assurance
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+        pip install flake8 pylint
+    
+    - name: Run linting
+      run: |
+        flake8 src/ main.py --max-line-length=100 --exclude=__pycache__
+        pylint src/ main.py --disable=C0103,R0903,R0913,W0613
+    
+    - name: Run unit tests
+      run: |
+        python run_tests.py --unit --coverage --verbose
+    
+    - name: Run integration tests
+      run: |
+        python run_tests.py --integration --verbose
+    
+    - name: Generate test report
+      run: |
+        python run_tests.py --report
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+    
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.python-version }}
+        path: |
+          htmlcov/
+          test-results.xml
+          coverage.xml
+          vlan_cleanup_report_*.json
+
+  # Security Scanning
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit
+        pip install -r requirements.txt
+    
+    - name: Run safety check
+      run: |
+        safety check --json --output safety-report.json || true
+    
+    - name: Run bandit security scan
+      run: |
+        bandit -r src/ main.py -f json -o bandit-report.json || true
+    
+    - name: Upload security artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          safety-report.json
+          bandit-report.json
+
+  # Build and Package
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name == 'push' || github.event_name == 'release'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build wheel setuptools
+    
+    - name: Create version file
+      run: |
+        echo "VERSION=${{ github.sha }}" > version.txt
+        echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> version.txt
+        echo "BRANCH=${{ github.ref_name }}" >> version.txt
+    
+    - name: Create deployment package
+      run: |
+        mkdir -p dist/
+        tar -czf dist/vlan-cleanup-automation-${{ github.sha }}.tar.gz \
+          --exclude='.git*' \
+          --exclude='tests/' \
+          --exclude='htmlcov/' \
+          --exclude='*.pyc' \
+          --exclude='__pycache__' \
+          .
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-package
+        path: |
+          dist/vlan-cleanup-automation-${{ github.sha }}.tar.gz
+          version.txt
+
+  # Deploy to Development Environment
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment: development
+    
+    steps:
+    - name: Download deployment package
+      uses: actions/download-artifact@v3
+      with:
+        name: deployment-package
+    
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+    
+    - name: Add SSH known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Deploy to Development VM
+      run: |
+        # Transfer deployment package
+        scp dist/vlan-cleanup-automation-${{ github.sha }}.tar.gz \
+          ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/tmp/
+        
+        # Execute deployment script
+        ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} << 'EOF'
+          set -e
+          
+          # Configuration
+          SERVICE_DIR="/opt/vlan-cleanup-automation"
+          BACKUP_DIR="/opt/backups/vlan-cleanup-automation"
+          SERVICE_USER="itential"
+          
+          # Create backup of current deployment
+          if [ -d "$SERVICE_DIR" ]; then
+            sudo mkdir -p "$BACKUP_DIR"
+            sudo cp -r "$SERVICE_DIR" "$BACKUP_DIR/backup-$(date +%Y%m%d-%H%M%S)"
+          fi
+          
+          # Extract new deployment
+          sudo mkdir -p "$SERVICE_DIR"
+          cd "$SERVICE_DIR"
+          sudo tar -xzf "/tmp/vlan-cleanup-automation-${{ github.sha }}.tar.gz"
+          
+          # Set permissions
+          sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$SERVICE_DIR"
+          sudo chmod +x "$SERVICE_DIR/main.py"
+          sudo chmod +x "$SERVICE_DIR/run_tests.py"
+          
+          # Install/update Python dependencies
+          sudo -u "$SERVICE_USER" python3 -m pip install --user -r "$SERVICE_DIR/requirements.txt"
+          
+          # Run health check
+          sudo -u "$SERVICE_USER" python3 "$SERVICE_DIR/main.py" --help > /dev/null
+          
+          # Update IAG service if repository exists
+          if command -v itential-iag >/dev/null 2>&1; then
+            sudo -u "$SERVICE_USER" itential-iag repository update vlan-cleanup-automation || true
+          fi
+          
+          echo "Deployment to development environment completed successfully"
+        EOF
+    
+    - name: Run deployment tests
+      run: |
+        ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} << 'EOF'
+          cd /opt/vlan-cleanup-automation
+          sudo -u itential python3 run_tests.py --unit --verbose
+        EOF
+
+  # Deploy to Production Environment
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'release'
+    environment: production
+    
+    steps:
+    - name: Download deployment package
+      uses: actions/download-artifact@v3
+      with:
+        name: deployment-package
+    
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+    
+    - name: Add SSH known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.PROD_HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Deploy to Production VM
+      run: |
+        # Transfer deployment package
+        scp dist/vlan-cleanup-automation-${{ github.sha }}.tar.gz \
+          ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }}:/tmp/
+        
+        # Execute production deployment script
+        ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} << 'EOF'
+          set -e
+          
+          # Configuration
+          SERVICE_DIR="/opt/vlan-cleanup-automation"
+          BACKUP_DIR="/opt/backups/vlan-cleanup-automation"
+          SERVICE_USER="itential"
+          
+          echo "Starting production deployment..."
+          
+          # Create backup of current deployment
+          if [ -d "$SERVICE_DIR" ]; then
+            sudo mkdir -p "$BACKUP_DIR"
+            sudo cp -r "$SERVICE_DIR" "$BACKUP_DIR/backup-$(date +%Y%m%d-%H%M%S)"
+            echo "Backup created successfully"
+          fi
+          
+          # Extract new deployment
+          sudo mkdir -p "$SERVICE_DIR"
+          cd "$SERVICE_DIR"
+          sudo tar -xzf "/tmp/vlan-cleanup-automation-${{ github.sha }}.tar.gz"
+          
+          # Set permissions
+          sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$SERVICE_DIR"
+          sudo chmod +x "$SERVICE_DIR/main.py"
+          sudo chmod +x "$SERVICE_DIR/run_tests.py"
+          
+          # Install/update Python dependencies
+          sudo -u "$SERVICE_USER" python3 -m pip install --user -r "$SERVICE_DIR/requirements.txt"
+          
+          # Run comprehensive health check
+          echo "Running health checks..."
+          sudo -u "$SERVICE_USER" python3 "$SERVICE_DIR/main.py" --help > /dev/null
+          sudo -u "$SERVICE_USER" python3 "$SERVICE_DIR/run_tests.py" --unit
+          
+          # Update IAG service
+          if command -v itential-iag >/dev/null 2>&1; then
+            echo "Updating IAG service..."
+            sudo -u "$SERVICE_USER" itential-iag repository update vlan-cleanup-automation
+            echo "IAG service updated successfully"
+          else
+            echo "WARNING: IAG CLI not found, manual service update required"
+          fi
+          
+          # Create service status file
+          echo "SERVICE_VERSION=${{ github.sha }}" | sudo tee "$SERVICE_DIR/deployment.info"
+          echo "DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | sudo tee -a "$SERVICE_DIR/deployment.info"
+          echo "DEPLOYED_BY=GitHub Actions" | sudo tee -a "$SERVICE_DIR/deployment.info"
+          
+          echo "Production deployment completed successfully"
+        EOF
+    
+    - name: Run production validation tests
+      run: |
+        ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} << 'EOF'
+          cd /opt/vlan-cleanup-automation
+          echo "Running production validation tests..."
+          sudo -u itential python3 run_tests.py --unit --verbose
+          
+          # Test IAG service availability
+          if command -v itential-iag >/dev/null 2>&1; then
+            sudo -u itential itential-iag service get vlan-cleanup-automation || echo "Service not found in IAG"
+          fi
+        EOF
+    
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} << 'EOF'
+          echo "Deployment failed, initiating rollback..."
+          
+          SERVICE_DIR="/opt/vlan-cleanup-automation"
+          BACKUP_DIR="/opt/backups/vlan-cleanup-automation"
+          
+          # Find latest backup
+          LATEST_BACKUP=$(sudo find "$BACKUP_DIR" -name "backup-*" -type d | sort | tail -1)
+          
+          if [ -n "$LATEST_BACKUP" ]; then
+            echo "Rolling back to: $LATEST_BACKUP"
+            sudo rm -rf "$SERVICE_DIR"
+            sudo cp -r "$LATEST_BACKUP" "$SERVICE_DIR"
+            sudo chown -R itential:itential "$SERVICE_DIR"
+            echo "Rollback completed"
+          else
+            echo "No backup found for rollback"
+            exit 1
+          fi
+        EOF
+
+  # Register/Update IAG Service
+  register-iag-service:
+    name: Register IAG Service
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-prod]
+    if: always() && (needs.deploy-dev.result == 'success' || needs.deploy-prod.result == 'success')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup SSH for IAG operations
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ needs.deploy-prod.result == 'success' && secrets.PROD_SSH_PRIVATE_KEY || secrets.DEV_SSH_PRIVATE_KEY }}
+    
+    - name: Register/Update IAG Service
+      run: |
+        TARGET_HOST=${{ needs.deploy-prod.result == 'success' && secrets.PROD_HOST || secrets.DEV_HOST }}
+        TARGET_USER=${{ needs.deploy-prod.result == 'success' && secrets.PROD_USER || secrets.DEV_USER }}
+        
+        ssh-keyscan -H "$TARGET_HOST" >> ~/.ssh/known_hosts
+        
+        ssh "$TARGET_USER@$TARGET_HOST" << 'EOF'
+          # Check if IAG CLI is available
+          if ! command -v itential-iag >/dev/null 2>&1; then
+            echo "IAG CLI not found, skipping service registration"
+            exit 0
+          fi
+          
+          # Switch to service user
+          sudo -u itential bash << 'INNER_EOF'
+            cd /opt/vlan-cleanup-automation
+            
+            # Check if repository exists, create if not
+            if ! itential-iag repository get vlan-cleanup-automation >/dev/null 2>&1; then
+              echo "Creating IAG repository..."
+              itential-iag repository create \
+                --name "vlan-cleanup-automation" \
+                --description "Enterprise VLAN cleanup automation for multi-vendor networks" \
+                --url "https://github.com/keepithuman/vlan-cleanup-automation.git" \
+                --reference "main"
+            else
+              echo "Updating existing IAG repository..."
+              itential-iag repository update vlan-cleanup-automation
+            fi
+            
+            # Check if service exists, create if not
+            if ! itential-iag service get vlan-cleanup-automation >/dev/null 2>&1; then
+              echo "Creating IAG service..."
+              itential-iag service create python-script \
+                --name "vlan-cleanup-automation" \
+                --repository "vlan-cleanup-automation" \
+                --description "Automated VLAN cleanup and analysis service" \
+                --filename "main.py" \
+                --working-dir "."
+            else
+              echo "Service already exists, skipping creation"
+            fi
+            
+            echo "IAG service registration completed"
+        INNER_EOF
+        EOF
