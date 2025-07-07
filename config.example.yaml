@@ -1,0 +1,124 @@
+# Example configuration file for VLAN cleanup automation
+# Copy this to config.yaml and customize for your environment
+
+# Device inventory
+devices:
+  - hostname: "core-switch-01"
+    ip_address: "192.168.1.10"
+    vendor: "cisco"
+    device_type: "cisco_ios"
+    model: "Catalyst 9300"
+    management_ip: "192.168.1.10"
+    
+  - hostname: "access-switch-01"
+    ip_address: "192.168.1.20"
+    vendor: "cisco"
+    device_type: "cisco_ios"
+    model: "Catalyst 2960X"
+    
+  - hostname: "dc-spine-01"
+    ip_address: "192.168.1.30"
+    vendor: "arista"
+    device_type: "arista_eos"
+    model: "DCS-7280SR"
+    
+  - hostname: "edge-router-01"
+    ip_address: "192.168.1.40"
+    vendor: "juniper"
+    device_type: "juniper_junos"
+    model: "MX204"
+
+# Authentication configuration
+authentication:
+  username: "admin"
+  password: "your_password_here"  # Use environment variables in production
+  enable_password: "your_enable_password"  # For Cisco devices
+
+# VLAN analysis configuration
+vlan_analysis:
+  # VLANs to exclude from cleanup (always preserved)
+  exclude_vlans: [1, 1002, 1003, 1004, 1005]
+  
+  # Minimum age in days before a VLAN is considered for cleanup
+  minimum_age_days: 30
+  
+  # Require manual approval for high-risk VLANs
+  require_manual_approval: true
+  
+  # Keywords that mark VLANs as critical
+  critical_vlan_names: 
+    - "management"
+    - "mgmt"
+    - "native"
+    - "default"
+    - "voice"
+    - "data"
+    - "production"
+    - "prod"
+
+# Processing configuration
+processing:
+  # Maximum number of devices to process concurrently
+  max_concurrent_devices: 5
+  
+  # Timeout for device connections (seconds)
+  device_timeout: 60
+  
+  # Number of connection retry attempts
+  connection_retries: 3
+  
+  # Delay between retry attempts (seconds)
+  retry_delay: 5
+
+# Output configuration
+output:
+  # Output format (json, yaml)
+  format: "json"
+  
+  # Default output file
+  file: "vlan_cleanup_results.json"
+  
+  # Generate backup/rollback commands
+  backup_commands: true
+  
+  # Generate rollback scripts
+  generate_rollback: true
+
+# Logging configuration
+logging:
+  # Log level (DEBUG, INFO, WARNING, ERROR)
+  level: "INFO"
+  
+  # Log file location
+  file: "vlan_cleanup.log"
+  
+  # Maximum log file size in MB
+  max_size_mb: 10
+  
+  # Number of backup log files to keep
+  backup_count: 5
+
+# Security configuration
+security:
+  # Encrypt credentials in memory
+  encrypt_credentials: true
+  
+  # Maintain audit trail
+  audit_trail: true
+  
+  # Require approval for critical VLANs
+  require_approval_for_critical: true
+
+# Business impact calculation parameters
+business_metrics:
+  # Manual time per device (minutes)
+  manual_time_per_device: 30
+  
+  # Automated time per device (minutes) 
+  automated_time_per_device: 2
+  
+  # Cost per minute of engineer time (USD)
+  engineer_cost_per_minute: 2
+  
+  # Additional cost factors
+  operational_overhead_reduction: 0.15  # 15% reduction in operational overhead
